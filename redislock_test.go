@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/FJSDS/redislock"
 	. "github.com/bsm/ginkgo"
 	. "github.com/bsm/gomega"
-	. "github.com/bsm/redislock"
 	"github.com/go-redis/redis/v8"
 )
 
@@ -193,7 +193,8 @@ var redisClient *redis.Client
 var _ = BeforeSuite(func() {
 	redisClient = redis.NewClient(&redis.Options{
 		Network: "tcp",
-		Addr:    "127.0.0.1:6379", DB: 9,
+		Addr:    "10.23.20.53:6379", DB: 9,
+		Password: "iggcdl5,.",
 	})
 	Expect(redisClient.Ping(context.Background()).Err()).To(Succeed())
 })

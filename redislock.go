@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -18,6 +19,31 @@ var (
 	luaRefresh = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end`)
 	luaRelease = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`)
 	luaPTTL    = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pttl", KEYS[1]) else return -3 end`)
+	luaMSetNX = redis.NewScript(`if redis.call("msetnx",unpack(KEYS))== 1 then
+	local t = 0
+	for index,value in ipairs(KEYS) do
+		if t==1 then
+			t=0 
+		else 
+			t=1
+			if redis.call("expire",value,ARGV[1])==0 then return 0 end
+   	 	end
+	end 
+	return 1 
+else 
+	return 0 
+end`)
+	luaReleaseMany = redis.NewScript(`
+	local values = redis.call("mget",unpack(KEYS)); 
+	local equal = 0;
+	for index,value in ipairs(values) do
+		if value ~= ARGV[1] then
+			return 0
+		end
+	end
+	redis.call("del",unpack(KEYS))
+	return 1
+`)
 )
 
 var (
@@ -66,6 +92,7 @@ func (c *Client) Obtain(ctx context.Context, key string, ttl time.Duration, opt 
 
 	var timer *time.Timer
 	for {
+		fmt.Println(1)
 		ok, err := c.obtain(deadlinectx, key, value, ttl)
 		if err != nil {
 			return nil, err
@@ -93,8 +120,62 @@ func (c *Client) Obtain(ctx context.Context, key string, ttl time.Duration, opt 
 	}
 }
 
+func (c *Client) ObtainMany(ctx context.Context,ttlSecond int64, opt *Options, keys... string ) (*Lock, error) {
+	// Create a random token
+	token, err := c.randomToken()
+	if err != nil {
+		return nil, err
+	}
+
+	value := token + opt.getMetadata()
+	retry := opt.getRetryStrategy()
+
+	deadlinectx, cancel := context.WithDeadline(ctx, time.Now().Add(time.Second*time.Duration(ttlSecond)))
+	defer cancel()
+	args:=make([]string,0,len(keys)*2)
+	for i:=range keys{
+		args=append(args,keys[i],value)
+	}
+	//TODO
+	var timer *time.Timer
+	for {
+		ok, err := c.obtainMany(deadlinectx, args, ttlSecond)
+		if err != nil {
+			return nil, err
+		} else if ok {
+			return &Lock{client: c, keys: keys,value: value}, nil
+		}
+
+		backoff := retry.NextBackoff()
+		if backoff < 1 {
+			return nil, ErrNotObtained
+		}
+
+		if timer == nil {
+			timer = time.NewTimer(backoff)
+			defer timer.Stop()
+		} else {
+			timer.Reset(backoff)
+		}
+
+		select {
+		case <-deadlinectx.Done():
+			return nil, ErrNotObtained
+		case <-timer.C:
+		}
+	}
+}
+
 func (c *Client) obtain(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
 	return c.client.SetNX(ctx, key, value, ttl).Result()
+}
+
+func (c *Client)obtainMany(ctx context.Context,args []string, tt1 int64) (bool,error) {
+	okV,err:=luaMSetNX.Run(ctx,c.client,args,tt1).Result()
+	if err!=nil{
+		return false,err
+	}
+	return okV==int64(1),nil
 }
 
 func (c *Client) randomToken() (string, error) {
@@ -118,7 +199,11 @@ type Lock struct {
 	client *Client
 	key    string
 	value  string
+
+	keys []string
+	values []interface{}
 }
+
 
 // Obtain is a short-cut for New(...).Obtain(...).
 func Obtain(ctx context.Context, client RedisClient, key string, ttl time.Duration, opt *Options) (*Lock, error) {
@@ -128,6 +213,14 @@ func Obtain(ctx context.Context, client RedisClient, key string, ttl time.Durati
 // Key returns the redis key used by the lock.
 func (l *Lock) Key() string {
 	return l.key
+}
+
+func (l *Lock) Keys() []string {
+	return l.keys
+}
+
+func (l *Lock) Values() []interface{} {
+	return l.values[:len(l.values)-1]
 }
 
 // Token returns the token value set by the lock.
@@ -155,6 +248,8 @@ func (l *Lock) TTL(ctx context.Context) (time.Duration, error) {
 	return 0, nil
 }
 
+
+
 // Refresh extends the lock with a new TTL.
 // May return ErrNotObtained if refresh is unsuccessful.
 func (l *Lock) Refresh(ctx context.Context, ttl time.Duration, opt *Options) error {
@@ -171,7 +266,13 @@ func (l *Lock) Refresh(ctx context.Context, ttl time.Duration, opt *Options) err
 // Release manually releases the lock.
 // May return ErrLockNotHeld.
 func (l *Lock) Release(ctx context.Context) error {
-	res, err := luaRelease.Run(ctx, l.client.client, []string{l.key}, l.value).Result()
+	var res interface{}
+	var err error
+	if l.key!="" {
+		res, err = luaRelease.Run(ctx, l.client.client, []string{l.key}, l.value).Result()
+	}else {
+		res, err = luaReleaseMany.Run(ctx, l.client.client, l.keys, l.value).Result()
+	}
 	if err == redis.Nil {
 		return ErrLockNotHeld
 	} else if err != nil {
@@ -183,6 +284,7 @@ func (l *Lock) Release(ctx context.Context) error {
 	}
 	return nil
 }
+
 
 // --------------------------------------------------------------------
 
