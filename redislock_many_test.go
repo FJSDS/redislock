@@ -10,8 +10,8 @@ import (
 
 var redisClient = redis.NewClient(&redis.Options{
 	Network: "tcp",
-	Addr:    "10.23.20.53:6379", DB: 9,
-	Password: "iggcdl5,.",
+	Addr:    "127.0.0.1:6379", DB: 0,
+	Password: "",
 })
 
 
