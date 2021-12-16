@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -92,7 +91,6 @@ func (c *Client) Obtain(ctx context.Context, key string, ttl time.Duration, opt 
 
 	var timer *time.Timer
 	for {
-		fmt.Println(1)
 		ok, err := c.obtain(deadlinectx, key, value, ttl)
 		if err != nil {
 			return nil, err
